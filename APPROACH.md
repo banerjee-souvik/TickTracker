@@ -5,7 +5,7 @@
 
 ## 1. Problem Statement
 
-Indian retail investors lack a tool that separates **material corporate events** (SEBI filings, auditor resignations, earnings misses) from market noise (analyst price targets, generic upgrades). This tool monitors NSE/BSE stocks, scores news for materiality using an AI engine, surfaces alerts on a real-time dashboard, and pushes high-signal events to Telegram.
+Indian retail investors lack a tool that separates **material corporate events** (SEBI filings, auditor resignations, earnings misses) from market noise (analyst price targets, generic upgrades). This tool monitors NSE/BSE stocks, scores news for materiality using a local AI stack, surfaces alerts on a real-time dashboard, and pushes high-signal events to Telegram.
 
 ---
 
@@ -13,9 +13,9 @@ Indian retail investors lack a tool that separates **material corporate events**
 
 - **Real-time awareness** of material events for a personal watchlist of NSE/BSE tickers
 - **AI-powered materiality scoring** — no alert fatigue, only score ≥ 7 triggers a notification
-- **Unified dashboard** — prices, alerts timeline, news feed, watchlist management
+- **Unified dashboard** — prices, alert timeline, watchlist management
 - **Telegram bot** — passive alerts + interactive queries (price, latest news, add/remove tickers)
-- **Extensible** — new data sources or scoring rules should require minimal code changes
+- **Zero paid API dependencies** — runs entirely on local models and free data sources
 
 ---
 
@@ -29,16 +29,16 @@ Indian retail investors lack a tool that separates **material corporate events**
                            │
               ┌────────────▼────────────┐
               │      SCRAPER AGENT      │
-              │  Firecrawl + RSS Feeds  │
-              │  (SEBI, NSE, BSE,       │
+              │  RSS Feeds + NSE API    │
+              │  (SEBI, NSE,            │
               │   Moneycontrol, ET)     │
               └────────────┬────────────┘
-                           │  raw news docs
+                           │  raw news docs (24h lookback)
               ┌────────────▼────────────┐
               │    ANALYSIS AGENT       │
-              │   Gemini 2.0 Flash       │
+              │  FinBERT (sentiment)    │
+              │  + keyword rules        │
               │  Materiality Score 1-10 │
-              │  Sentiment + Summary    │
               └──────┬─────────┬────────┘
                      │         │
            score≥7   │         │  always
@@ -46,19 +46,21 @@ Indian retail investors lack a tool that separates **material corporate events**
        ┌─────────────▼──┐  ┌───▼──────────────┐
        │  TELEGRAM BOT  │  │    MONGODB        │
        │  Alert Push    │  │  alerts collection│
-       │  + Query Mode  │  │  watchlist        │
+       │  + Query Mode* │  │  watchlist        │
        └────────────────┘  │  raw_news         │
                            └───────┬───────────┘
                                    │
                         ┌──────────▼──────────┐
                         │   FASTAPI BACKEND   │
-                        │   REST + WebSocket  │
+                        │   REST API          │
                         └──────────┬──────────┘
-                                   │
+                                   │  HTTP polling (60s)
                         ┌──────────▼──────────┐
                         │   NEXT.JS DASHBOARD │
-                        │   Real-time UI      │
+                        │   Dark UI           │
                         └─────────────────────┘
+
+* Telegram query commands — Phase 2 (not yet built)
 ```
 
 ---
@@ -67,16 +69,28 @@ Indian retail investors lack a tool that separates **material corporate events**
 
 | Layer | Technology | Rationale |
 |---|---|---|
-| **Backend** | Python 3.12 + FastAPI | Async-first, great financial lib support |
-| **AI Engine** | FinBERT (`ProsusAI/finbert`) + keyword rules | Sentiment via finance-tuned BERT, materiality via rules — local, free, no rate limits |
-| **Stock Data** | `yfinance` + NSE India unofficial API | Free, covers NSE/BSE, OHLCV + metadata |
-| **News Scraping** | `feedparser` (RSS) + NSE JSON API via `httpx` | No API key needed, free, structured data |
+| **Backend** | Python 3.9+ + FastAPI | Async-first, great financial lib support |
+| **AI — Sentiment** | FinBERT (`ProsusAI/finbert`) | Finance-tuned BERT, runs locally, free, no rate limits |
+| **AI — Materiality** | Keyword rule engine (`scorer_service.py`) | Deterministic, explainable, zero latency |
+| **Stock Data** | `yfinance` | Free, covers NSE/BSE, OHLCV + metadata |
+| **News Scraping** | `feedparser` (RSS) + NSE JSON API via `httpx` | No API key needed, 24h lookback filter applied |
 | **Database** | MongoDB (via `motor` async driver) | Schema-flexible alert documents, raw JSON storage |
-| **Dashboard** | Next.js 14 (App Router) + TailwindCSS | SSR + real-time WebSocket support |
-| **Charts** | TradingView Lightweight Charts | Professional-grade financial charting, free |
+| **Dashboard** | Next.js 16 (App Router) + TailwindCSS | SSR + client polling, dark theme |
 | **Telegram** | `python-telegram-bot` v21 (async) | Mature, supports inline queries + webhooks |
 | **Scheduler** | APScheduler 3.x | In-process job scheduling, no extra infra |
-| **Deployment** | Docker Compose (local-first) | Reproducible, easy to push to VPS later |
+| **Package manager** | Yarn 4 + Volta | Reproducible Node/Yarn versions, fast installs |
+| **Deployment** | Docker Compose (MongoDB only for now) | Easy local setup, VPS-ready later |
+
+### Why no paid AI API?
+
+We evaluated Claude API, Groq, and Gemini before settling on a local stack:
+
+| Option | Problem |
+|---|---|
+| Anthropic API | Costs money, not included in Pro subscription |
+| Groq free tier | Rate limits hit quickly during testing |
+| Gemini free tier | 20 RPD hard limit on 2.5 Flash; exhausted in one session |
+| **FinBERT + keywords** | Local, free, finance-specialised, zero latency |
 
 ---
 
@@ -94,6 +108,22 @@ Indian retail investors lack a tool that separates **material corporate events**
 }
 ```
 
+### `raw_news`
+```json
+{
+  "_id": "ObjectId",
+  "ticker": "RELIANCE.NS",
+  "headline": "...",
+  "raw_content": "...",
+  "source_url": "https://...",
+  "source_name": "ET Markets",
+  "url_hash": "sha256-of-source_url",
+  "status": "pending_analysis | analysed | analysis_failed",
+  "published_at": "2026-05-06T09:00:00Z",
+  "created_at": "2026-05-06T09:05:00Z"
+}
+```
+
 ### `alerts`
 ```json
 {
@@ -105,7 +135,7 @@ Indian retail investors lack a tool that separates **material corporate events**
   "summary": "...",
   "watch": "Q1 FY27 cash flow statement",
   "source_url": "https://...",
-  "raw_content": "...",
+  "source_name": "ET Markets",
   "telegram_sent": true,
   "created_at": "2026-05-06T10:30:00Z"
 }
@@ -118,56 +148,90 @@ Indian retail investors lack a tool that separates **material corporate events**
   "ltp": 2945.50,
   "change_pct": -1.23,
   "volume": 4821034,
-  "52w_high": 3217.00,
-  "52w_low": 2220.10,
+  "week_52_high": 3217.00,
+  "week_52_low": 2220.10,
+  "market_cap": 19842300000000,
   "fetched_at": "2026-05-06T10:00:00Z"
 }
 ```
 
+Ticker deduplication: SHA-256 hash of `source_url` stored in `raw_news.url_hash` — articles already seen are skipped before analysis.
+
 ---
 
-## 6. News Sources & RSS Feeds
+## 6. News Sources
 
-| Source | Type | URL Pattern |
+| Source | Type | Notes |
 |---|---|---|
 | SEBI Corporate Filings | RSS | `https://www.sebi.gov.in/rss.html` |
-| NSE Announcements | JSON API | `https://www.nseindia.com/api/corporate-announcements?index=equities&symbol={SYMBOL}` |
-| Moneycontrol News | RSS | `https://www.moneycontrol.com/rss/results.xml` |
-| ET Markets | RSS | `https://economictimes.indiatimes.com/markets/rss.cms` |
-| BSE Filings | Scrape | `https://www.bseindia.com/corporates/ann.html` |
+| NSE Announcements | JSON API | `nseindia.com/api/corporate-announcements` per symbol |
+| Moneycontrol News | RSS | Results + corporate feed |
+| ET Markets | RSS | `economictimes.indiatimes.com/markets/rss.cms` |
+
+All sources apply a **24-hour lookback filter** (`NEWS_LOOKBACK_HOURS = 24`) — stale articles from prior days are discarded before any processing.
 
 ---
 
-## 7. Materiality Scoring Rules (passed to Claude)
+## 7. Materiality Scoring Rules
 
-```
-Score 1-4  → Routine: price targets, generic upgrades, FII/DII data
-Score 5-6  → Notable: new product launch, management commentary, block deals
-Score 7    → Alert threshold
-Score 7-8  → Important: earnings miss/beat >10%, large capex announcement, key management change
-Score 9-10 → Critical: auditor resignation, SEBI investigation, promoter pledge increase >5%, 
-             M&A announcement, fraud allegation, insolvency filing
-```
+Implemented in `backend/services/scorer_service.py`. First-match-wins across keyword groups, checked against both headline and content (lowercased).
+
+| Score | Trigger keywords | Category |
+|---|---|---|
+| 10 | auditor resign, going concern, fraud, insolvency | Existential |
+| 9 | sebi probe, sebi investigation, sebi notice, M&A, delisting, promoter pledge | Regulatory / structural |
+| 8 | ceo steps down, cfo steps down, rating downgrade, order win, earnings miss | Key event |
+| 7 | dividend, buyback, quarterly results, earnings beat | Regular material |
+| 5 | product launch, block deal, MOU | Notable |
+| 3 | price target, analyst upgrade, market wrap | Routine |
+| 4 | *(default — no keyword matched)* | Background |
+
+**Alert threshold:** score ≥ 7 triggers Telegram. Currently set to 4 in `.env` / `config.py` for testing.
 
 ---
 
 ## 8. Dashboard Pages
 
-| Page | Description |
-|---|---|
-| `/` | Overview — watchlist prices, recent high-score alerts, market breadth |
-| `/alerts` | Full alert log with filters (ticker, score, sentiment, date) |
-| `/ticker/[symbol]` | Per-ticker view — price chart, all alerts, latest filings |
-| `/settings` | Manage watchlist, Telegram config, scan interval |
+All pages are dark-themed (zinc-950 background), server-rendered with a 60-second client polling cycle for new alerts.
+
+| Page | Route | Description |
+|---|---|---|
+| Overview | `/` | Stat cards (total alerts, high-mat, bullish/bearish), live alert feed, price widgets, watchlist chips |
+| Alerts | `/alerts` | Full log with free-text search, sentiment pill filter, score range filter |
+| Ticker | `/ticker/[symbol]` | Per-ticker alert history + price widget |
+| Settings | `/settings` | Add/remove watchlist tickers, manual scan trigger |
+
+### Component structure
+
+```
+components/
+  AlertCard.tsx      — full alert card with clickable ticker badge
+  PriceWidget.tsx    — LTP, change%, 52-week range bar, market cap
+  ScoreBadge.tsx     — colour-coded score (red ≥9, amber ≥7, yellow ≥5, gray)
+  SentimentBadge.tsx — dot + label (emerald=Bullish, red=Bearish, gray=Neutral)
+  Sidebar.tsx        — fixed left nav with active route highlight
+hooks/
+  useAlerts.ts       — polls /api/alerts every 60 seconds, merges with SSR initial state
+```
+
+### Why polling over WebSocket?
+
+The scanner runs every 15 minutes. A WebSocket connection (with reconnect logic) adds complexity for a benefit that's invisible at that cadence. 60-second polling is simpler, and the backend WebSocket endpoint (`/ws`) remains available if live price streaming is added later.
 
 ---
 
-## 9. Telegram Bot Commands
+## 9. Telegram Bot
+
+### Push alerts (Phase 1 — complete)
+
+When `alert_agent.py` stores a new alert with `materiality_score ≥ threshold`, it calls `telegram_service.py` which formats and sends a message to all `TELEGRAM_CHAT_IDS`.
+
+### Interactive commands (Phase 2 — not yet built)
 
 | Command | Description |
 |---|---|
 | `/start` | Welcome + help |
-| `/price RELIANCE.NS` | Get current LTP + day change |
+| `/price RELIANCE.NS` | Current LTP + day change |
 | `/latest RELIANCE.NS` | Last 3 alerts for a ticker |
 | `/add TATAMOTORS.NS` | Add ticker to watchlist |
 | `/remove TATAMOTORS.NS` | Remove ticker from watchlist |
@@ -182,35 +246,53 @@ Score 9-10 → Critical: auditor resignation, SEBI investigation, promoter pledg
 TickTracker/
 ├── backend/
 │   ├── agents/
-│   │   ├── scraper_agent.py
-│   │   ├── analysis_agent.py
-│   │   └── alert_agent.py
+│   │   ├── scraper_agent.py      # RSS + NSE API, 24h filter, dedup by URL hash
+│   │   ├── analysis_agent.py     # FinBERT sentiment + keyword materiality scoring
+│   │   └── alert_agent.py        # Stores alert, triggers Telegram push
 │   ├── services/
-│   │   ├── stock_service.py       # yfinance wrapper
-│   │   ├── telegram_service.py    # bot + push notifications
-│   │   └── mongo_service.py       # DB operations
+│   │   ├── finbert_service.py    # FinBERT inference (thread pool)
+│   │   ├── scorer_service.py     # Keyword materiality rule engine
+│   │   ├── stock_service.py      # yfinance wrapper, 5-min price cache
+│   │   ├── telegram_service.py   # Bot init + push notifications
+│   │   └── mongo_service.py      # DB connection + index setup
 │   ├── scheduler/
-│   │   └── jobs.py                # APScheduler job definitions
+│   │   └── jobs.py               # APScheduler: full_scan every 15min, price refresh
 │   ├── api/
 │   │   ├── routes/
-│   │   │   ├── watchlist.py
 │   │   │   ├── alerts.py
-│   │   │   └── prices.py
-│   │   └── websocket.py           # real-time alert push to dashboard
-│   ├── main.py                    # FastAPI app entrypoint
-│   └── config.py                  # env vars, constants
+│   │   │   ├── prices.py
+│   │   │   ├── scan.py
+│   │   │   └── watchlist.py
+│   │   └── websocket.py          # WebSocket manager (backend ready, unused by dashboard)
+│   ├── main.py                   # FastAPI app, CORS, lifespan
+│   └── config.py                 # Settings, RSS feeds, thresholds
 ├── frontend/
 │   ├── app/
-│   │   ├── page.tsx               # Dashboard overview
-│   │   ├── alerts/page.tsx
-│   │   └── ticker/[symbol]/page.tsx
+│   │   ├── page.tsx              # Overview (SSR)
+│   │   ├── OverviewClient.tsx    # Client shell with polling
+│   │   ├── alerts/
+│   │   │   ├── page.tsx
+│   │   │   └── AlertsClient.tsx  # Search + filter UI
+│   │   ├── settings/
+│   │   │   ├── page.tsx
+│   │   │   └── SettingsClient.tsx
+│   │   └── ticker/[symbol]/
+│   │       └── page.tsx
 │   ├── components/
 │   │   ├── AlertCard.tsx
 │   │   ├── PriceWidget.tsx
-│   │   ├── WatchlistTable.tsx
-│   │   └── Chart.tsx
-│   └── lib/
-│       └── api.ts                 # API client
+│   │   ├── ScoreBadge.tsx
+│   │   ├── SentimentBadge.tsx
+│   │   └── Sidebar.tsx
+│   ├── hooks/
+│   │   └── useAlerts.ts          # 60s polling hook
+│   ├── lib/
+│   │   ├── api.ts                # fetch wrappers for all endpoints
+│   │   ├── types.ts              # Alert, Price, WatchlistItem interfaces
+│   │   └── utils.ts              # formatters + colour helpers
+│   ├── .yarnrc.yml               # nodeLinker: node-modules (Turbopack compat)
+│   └── next.config.ts            # turbopack.root set explicitly
+├── Makefile                      # make dev / make backend / make frontend / make kill
 ├── APPROACH.md
 ├── AGENTS.md
 ├── docker-compose.yml
@@ -221,25 +303,27 @@ TickTracker/
 
 ## 11. Build Phases
 
-### Phase 1 — Core Pipeline (Week 1)
-- [ ] MongoDB setup + data models
-- [ ] `yfinance` stock service
-- [ ] RSS news scraper
-- [ ] Claude analysis agent (materiality scoring)
-- [ ] Alert storage pipeline
+### Phase 1 — Core Pipeline ✅
+- [x] MongoDB setup + data models
+- [x] `yfinance` stock service with 5-min cache
+- [x] RSS + NSE JSON API scraper with 24h lookback
+- [x] FinBERT sentiment analysis (local)
+- [x] Keyword materiality scoring
+- [x] Alert storage pipeline
+- [x] Telegram push alerts
 
-### Phase 2 — Telegram Bot (Week 2)
-- [ ] Bot setup + command handlers
-- [ ] Alert push on score ≥ 7
-- [ ] Watchlist management via bot
+### Phase 3 — Dashboard ✅
+- [x] FastAPI REST endpoints (alerts, prices, watchlist, scan)
+- [x] Next.js 16 dark dashboard — overview, alerts, ticker, settings
+- [x] 60-second polling for live alert feed
+- [x] Score badges, sentiment badges, 52-week range bars
 
-### Phase 3 — Dashboard (Week 3)
-- [ ] FastAPI REST + WebSocket endpoints
-- [ ] Next.js dashboard — overview, alerts, ticker pages
-- [ ] TradingView chart integration
+### Phase 2 — Telegram Command Handlers (next)
+- [ ] `/price`, `/latest`, `/add`, `/remove`, `/watchlist`, `/scan` handlers
+- [ ] Inline watchlist management via bot
 
-### Phase 4 — Polish & Deploy (Week 4)
-- [ ] Docker Compose setup
-- [ ] `.env` configuration management
-- [ ] Rate limiting, error handling, retries
+### Phase 4 — Polish & Deploy
+- [ ] Full Docker Compose (backend + frontend containers)
+- [ ] Rate limiting, retries, error handling hardening
+- [ ] Reset `MATERIALITY_THRESHOLD` from 4 (test) back to 7 (production)
 - [ ] Optional: VPS deployment (Railway / Render / DigitalOcean)

@@ -4,6 +4,7 @@ import asyncio
 import calendar
 import hashlib
 import logging
+import re
 import time
 from datetime import date, datetime, timedelta, timezone
 
@@ -14,6 +15,23 @@ from config import RSS_FEEDS, NEWS_LOOKBACK_HOURS as _LOOKBACK_HOURS
 from services.mongo_service import get_db
 
 logger = logging.getLogger(__name__)
+
+_STRIP_SUFFIXES = re.compile(
+    r"\b(limited|ltd|corp(?:oration)?|co\.?|plc|inc\.?|industries|india|and|of|the)\b\.?",
+    re.I,
+)
+
+
+def _build_search_terms(ticker: str, company_name: str) -> list[str]:
+    """Return lowercase search terms for article matching: symbol + cleaned company name."""
+    symbol = ticker.replace(".NS", "").replace(".BO", "").lower()
+    terms = [symbol]
+    if company_name:
+        cleaned = _STRIP_SUFFIXES.sub("", company_name).strip().lower()
+        cleaned = " ".join(cleaned.split())  # normalise whitespace
+        if cleaned and cleaned != symbol:
+            terms.append(cleaned)
+    return terms
 
 
 def _url_hash(url: str) -> str:
@@ -29,8 +47,7 @@ def _is_recent(published_parsed: time.struct_time | None) -> bool:
     return pub_ts >= cutoff.timestamp()
 
 
-async def _fetch_rss(feed: dict, ticker: str) -> list[dict]:
-    symbol = ticker.replace(".NS", "").replace(".BO", "")
+async def _fetch_rss(feed: dict, ticker: str, search_terms: list[str]) -> list[dict]:
     try:
         parsed = await asyncio.to_thread(feedparser.parse, feed["url"])
         articles = []
@@ -42,7 +59,8 @@ async def _fetch_rss(feed: dict, ticker: str) -> list[dict]:
             link = entry.get("link", "")
             if not link:
                 continue
-            if symbol.lower() not in (title + summary).lower():
+            text = (title + " " + summary).lower()
+            if not any(term in text for term in search_terms):
                 continue
             articles.append({
                 "headline": title,
@@ -82,19 +100,19 @@ async def _fetch_nse_announcements(ticker: str) -> list[dict]:
             resp.raise_for_status()
             announcements = resp.json()
             articles = []
-            for item in announcements[:20]:
-                subject = item.get("subject", "").strip()
-                if not subject:
-                    continue
+            for item in announcements:  # sorted newest-first by NSE
                 an_dt = item.get("an_dt", "")
                 pub_dt = _parse_nse_date(an_dt)
                 if pub_dt and pub_dt < cutoff:
-                    continue  # too old
-                body = item.get("body", "").strip() or subject
+                    break  # everything after this is older — stop early
+                desc = item.get("desc", "").strip()
+                if not desc:
+                    continue
+                body = item.get("attchmntText", "").strip() or desc
                 att_url = item.get("attchmntFile", "")
-                source_url = att_url or f"https://www.nseindia.com/api/corporate-announcements?index=equities&symbol={symbol}&an_dt={an_dt}"
+                source_url = att_url or f"https://www.nseindia.com/api/corporate-announcements?index=equities&symbol={symbol}"
                 articles.append({
-                    "headline": f"{symbol}: {subject}",
+                    "headline": f"{symbol}: {desc}",
                     "raw_content": body[:3000],
                     "source_url": source_url,
                     "source_name": "NSE Announcements",
@@ -129,7 +147,13 @@ async def _save_articles(ticker: str, articles: list[dict]):
 
 
 async def scrape_ticker(ticker: str) -> int:
-    rss_tasks = [_fetch_rss(feed, ticker) for feed in RSS_FEEDS]
+    db = get_db()
+    doc = await db.watchlist.find_one({"ticker": ticker}, {"name": 1})
+    company_name = (doc or {}).get("name", "")
+    search_terms = _build_search_terms(ticker, company_name)
+    logger.debug("Search terms for %s: %s", ticker, search_terms)
+
+    rss_tasks = [_fetch_rss(feed, ticker, search_terms) for feed in RSS_FEEDS]
     nse_task = _fetch_nse_announcements(ticker)
     results = await asyncio.gather(*rss_tasks, nse_task)
     articles = [a for batch in results for a in batch]

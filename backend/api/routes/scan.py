@@ -6,7 +6,7 @@ router = APIRouter(prefix="/scan", tags=["scan"])
 @router.post("")
 async def trigger_scan(background_tasks: BackgroundTasks):
     background_tasks.add_task(_run_scan)
-    return {"status": "scan started"}
+    return {"status": "started", "message": "Scan started — alerts will update automatically"}
 
 
 async def _run_scan():

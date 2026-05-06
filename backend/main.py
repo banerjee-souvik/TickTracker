@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routes import alerts, prices, scan, watchlist
+from api.routes import alerts, prices, pulse, scan, watchlist
 from api.websocket import manager
 from scheduler.jobs import setup as setup_scheduler
 from services.mongo_service import close as close_mongo, setup_indexes
@@ -33,6 +33,7 @@ app.include_router(watchlist.router, prefix="/api")
 app.include_router(alerts.router, prefix="/api")
 app.include_router(prices.router, prefix="/api")
 app.include_router(scan.router, prefix="/api")
+app.include_router(pulse.router, prefix="/api")
 
 
 @app.websocket("/ws")

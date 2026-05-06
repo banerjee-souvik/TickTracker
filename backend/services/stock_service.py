@@ -33,8 +33,14 @@ async def refresh_price(ticker: str) -> dict | None:
             upsert=True,
         )
         return info
-    except Exception:
-        logger.exception("Failed to refresh price for %s", ticker)
+    except Exception as exc:
+        # 429 / transient errors — return stale cache rather than None
+        db = get_db()
+        cached = await db.price_cache.find_one({"_id": ticker})
+        if cached:
+            logger.warning("Price refresh failed for %s (%s) — serving stale cache", ticker, exc)
+            return cached
+        logger.error("Price refresh failed for %s and no cache available: %s", ticker, exc)
         return None
 
 
@@ -61,18 +67,22 @@ def _fetch_yfinance(ticker: str) -> dict | None:
     }
 
 
-async def validate_ticker(ticker: str) -> str | None:
-    """Returns the ticker string if valid, None if not found on yfinance."""
+async def validate_ticker(ticker: str) -> tuple[str, str] | None:
+    """Returns (normalised_ticker, company_name) if valid, None if not found."""
     ticker = ticker.upper()
     if not ticker.endswith(".NS") and not ticker.endswith(".BO"):
         ticker += ".NS"
     try:
         info = await asyncio.to_thread(lambda: yf.Ticker(ticker).info)
-        return ticker if info.get("longName") else None
+        long_name = info.get("longName", "")
+        return (ticker, long_name) if long_name else None
     except Exception:
         logger.warning("yfinance validation failed for %s, accepting ticker anyway", ticker)
-        return ticker
+        return (ticker, ticker)
 
 
 async def refresh_all_prices(tickers: list[str]):
-    await asyncio.gather(*[refresh_price(t) for t in tickers])
+    for i, ticker in enumerate(tickers):
+        await refresh_price(ticker)
+        if i < len(tickers) - 1:
+            await asyncio.sleep(1.5)  # avoid Yahoo Finance 429 rate limits

@@ -23,13 +23,14 @@ class Settings(BaseSettings):
 settings = Settings()
 
 RSS_FEEDS = [
-    {"name": "ET Markets", "url": "https://economictimes.indiatimes.com/markets/rss.cms"},
-    {"name": "Moneycontrol", "url": "https://www.moneycontrol.com/rss/results.xml"},
+    {"name": "ET Markets", "url": "https://economictimes.indiatimes.com/markets/stocks/news/rssfeeds/2146842.cms"},
+    {"name": "LiveMint", "url": "https://www.livemint.com/rss/markets"},
+    {"name": "Zerodha Pulse", "url": "https://pulse.zerodha.com/feed.xml"},
     {"name": "SEBI", "url": "https://www.sebi.gov.in/sebirss.xml"},
 ]
 
 MATERIALITY_THRESHOLD = 4
-NEWS_LOOKBACK_HOURS = 24  # only process articles published within this window
+NEWS_LOOKBACK_HOURS = 72  # only process articles published within this window (3 days)
 
 ANALYSIS_SYSTEM_PROMPT = """You are a senior equity analyst specialising in Indian listed companies (NSE/BSE).
 Given a news headline and article content, return a JSON object with exactly these fields:

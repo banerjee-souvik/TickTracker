@@ -49,8 +49,16 @@ async def process_article(doc: dict):
 async def run():
     db = get_db()
     cursor = db.raw_news.find({"status": "pending_analysis"})
-    count = 0
+    ok = failed = 0
     async for doc in cursor:
-        await process_article(doc)
-        count += 1
-    logger.info("Analysis complete: %d articles processed", count)
+        try:
+            await process_article(doc)
+            ok += 1
+        except Exception:
+            logger.exception("Failed to analyse article %s — marking analysis_failed", doc.get("_id"))
+            await db.raw_news.update_one(
+                {"_id": doc["_id"]},
+                {"$set": {"status": "analysis_failed"}},
+            )
+            failed += 1
+    logger.info("Analysis complete: %d processed, %d failed", ok, failed)

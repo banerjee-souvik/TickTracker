@@ -10,8 +10,8 @@ This file defines every AI agent and automated worker in TickTracker. Each entry
 |---|---|---|---|
 | Scraper Agent | `backend/agents/scraper_agent.py` | Scheduler / manual | Raw news documents → MongoDB `raw_news` |
 | Analysis Agent | `backend/agents/analysis_agent.py` | Per raw news doc | Scored alert document → MongoDB `alerts` |
-| Alert Agent | `backend/agents/alert_agent.py` | Per scored alert | Telegram push + WebSocket event |
-| Telegram Bot | `backend/services/telegram_service.py` | User commands | Bot responses + watchlist mutations |
+| Alert Agent | `backend/agents/alert_agent.py` | Per scored alert | Telegram push |
+| Telegram Bot | `backend/services/telegram_service.py` | User commands | Bot responses + watchlist mutations *(Phase 2 — not yet built)* |
 
 ---
 
@@ -23,17 +23,17 @@ This file defines every AI agent and automated worker in TickTracker. Each entry
 
 **Inputs:**
 - Active watchlist from MongoDB `watchlist` collection
-- Configured news sources (RSS feeds + Firecrawl URLs from `config.py`)
+- Configured news sources (RSS feeds from `config.py`)
 
 **Steps:**
 1. Fetch all active tickers from `watchlist`.
-2. For each ticker, query the following in parallel:
-   - RSS feeds: SEBI, NSE, Moneycontrol, ET Markets — parsed with `feedparser`
-   - Firecrawl scrape of NSE announcements page filtered by ticker
-   - BSE filing page scrape (if ticker has `.BO` suffix)
-3. Deduplicate against `raw_news` collection by URL hash (SHA-256 of `source_url`).
-4. Persist new documents to `raw_news` with status `pending_analysis`.
-5. Emit each new doc ID to the Analysis Agent queue.
+2. For each ticker, query the following:
+   - RSS feeds: SEBI, Moneycontrol, ET Markets — parsed with `feedparser`
+   - NSE Announcements JSON API — `nseindia.com/api/corporate-announcements` per symbol via `httpx`
+3. Apply a **24-hour lookback filter** (`NEWS_LOOKBACK_HOURS = 24`). Articles older than 24 hours are discarded before any DB write.
+4. Deduplicate against `raw_news` collection by URL hash (SHA-256 of `source_url`).
+5. Persist new documents to `raw_news` with status `pending_analysis`.
+6. Call Analysis Agent for each new document.
 
 **Output document (`raw_news`):**
 ```json
@@ -51,52 +51,42 @@ This file defines every AI agent and automated worker in TickTracker. Each entry
 
 **Failure behaviour:**
 - Individual source failure → log warning, skip source, continue with others
-- Firecrawl rate limit → exponential backoff (2s, 4s, 8s), max 3 retries
-- If entire run fails → APScheduler retries on next interval, alert not lost
+- NSE API rate limited → log and skip, RSS feeds still run
+- If entire run fails → APScheduler retries on next interval
 
-**Tools used:** `feedparser`, Firecrawl API, `motor` (MongoDB async driver)
+**Tools used:** `feedparser`, `httpx`, `motor` (MongoDB async driver)
 
 ---
 
 ## 2. Analysis Agent
 
-**Role:** Scores each raw news document for materiality and generates an engineer-grade summary using Claude.
+**Role:** Scores each raw news document for materiality and sentiment, then builds a structured alert.
 
 **Trigger:** New document inserted into `raw_news` with status `pending_analysis`.
 
 **Inputs:**
-- Raw news document from `raw_news` collection
-- Ticker context (sector, recent price) from `price_cache`
-- Scoring rubric (defined in `config.py`, injected into system prompt)
-
-**System Prompt Injected to Claude:**
-```
-You are a senior equity analyst specialising in Indian listed companies (NSE/BSE).
-Given a news item, return a JSON object with:
-  - materiality_score: integer 1-10
-  - sentiment: "Bullish" | "Bearish" | "Neutral"
-  - summary: 2-sentence plain-English explanation of the event
-  - watch: one key metric or price level to monitor next
-  - reasoning: one sentence explaining the score
-
-Scoring guide:
-  1-4: Routine (price targets, FII data, generic upgrades)
-  5-6: Notable (product launches, management commentary, block deals)
-  7-8: Important (earnings miss/beat >10%, large capex, key management change)
-  9-10: Critical (auditor resignation, SEBI probe, promoter pledge surge, M&A, insolvency)
-
-Return ONLY valid JSON. No preamble.
-```
+- Raw news document (`headline` + `raw_content`) from `raw_news` collection
 
 **Steps:**
 1. Fetch raw doc from `raw_news`.
-2. Build user message: headline + raw_content (truncated to 4000 tokens).
-3. Score materiality via keyword rules (`scorer_service.py`) — first-match wins, rules ordered 10→3.
-4. Score sentiment via FinBERT (`ProsusAI/finbert`) running locally in a thread pool.
-4. Parse response. If JSON invalid → retry once with a stricter prompt.
+2. Score materiality via keyword rules (`scorer_service.py`): first-match wins across ordered keyword groups (score 10 → 3), default 4 if nothing matches.
+3. Score sentiment via FinBERT (`ProsusAI/finbert`) running locally in a thread pool: input is `headline + raw_content[:512]`, label mapped to Bullish / Bearish / Neutral.
+4. Build a template-based summary (no LLM call): `"{ticker} — {headline} (Source: {source_name}). Materiality rated {score}/10."`.
 5. Write scored alert to `alerts` collection.
 6. Update `raw_news` status to `analysed`.
-7. If `materiality_score >= 7` → pass alert to Alert Agent.
+7. If `materiality_score >= MATERIALITY_THRESHOLD` → pass alert to Alert Agent.
+
+**Materiality keyword groups** (see `scorer_service.py` for full list):
+
+| Score | Trigger examples |
+|---|---|
+| 10 | auditor resign, going concern, fraud, insolvency |
+| 9 | sebi probe, sebi investigation, sebi notice, M&A, delisting, promoter pledge |
+| 8 | ceo steps down, cfo steps down, rating downgrade, order win, earnings miss |
+| 7 | dividend, buyback, quarterly results, earnings beat |
+| 5 | product launch, block deal, MOU |
+| 3 | price target, analyst upgrade, market wrap |
+| 4 | *(default)* |
 
 **Output document (`alerts`):**
 ```json
@@ -107,7 +97,6 @@ Return ONLY valid JSON. No preamble.
   "sentiment": "Bearish",
   "summary": "...",
   "watch": "...",
-  "reasoning": "...",
   "source_url": "...",
   "source_name": "...",
   "telegram_sent": false,
@@ -116,21 +105,21 @@ Return ONLY valid JSON. No preamble.
 ```
 
 **Failure behaviour:**
-- Groq API timeout → retry once with stricter prompt, then mark doc `analysis_failed`
-- Invalid JSON response → one retry, then mark `analysis_failed`
-- `analysis_failed` docs are visible in dashboard for manual review
+- FinBERT inference error → default sentiment to `Neutral`, continue
+- Unhandled exception → mark doc `analysis_failed`, log error, move on
+- `analysis_failed` docs are visible in dashboard for awareness
 
-**Tools used:** `transformers` (FinBERT `ProsusAI/finbert`), keyword scorer, `motor`
+**Tools used:** `transformers` (FinBERT `ProsusAI/finbert` via `pipeline`), `scorer_service.py`, `motor`
 
-**Cost note:** Completely free. Runs locally with no API calls. FinBERT model downloads once (~440MB) on first run and is cached.
+**Cost note:** Completely free — no API calls. FinBERT downloads once (~440 MB) on first run and is cached in `~/.cache/huggingface/`.
 
 ---
 
 ## 3. Alert Agent
 
-**Role:** Dispatches high-materiality alerts to Telegram and pushes a WebSocket event to the dashboard.
+**Role:** Dispatches high-materiality alerts to Telegram.
 
-**Trigger:** Analysis Agent passes an alert with `materiality_score >= 7`.
+**Trigger:** Analysis Agent passes an alert with `materiality_score >= MATERIALITY_THRESHOLD` (default 7; currently 4 for testing).
 
 **Inputs:**
 - Alert document from `alerts` collection
@@ -146,24 +135,23 @@ Return ONLY valid JSON. No preamble.
    ```
 2. Send to all configured `chat_id`s via `python-telegram-bot`.
 3. Update alert document: `telegram_sent: true`, `sent_at: ISO8601`.
-4. Emit WebSocket event `new_alert` to all connected dashboard clients.
 
 **Failure behaviour:**
 - Telegram API error → retry after 10s, max 3 retries
-- If all retries fail → mark `telegram_sent: false`, log error, dashboard still receives WebSocket event
-- WebSocket broadcast failure → non-fatal, dashboard polling fallback handles it
+- If all retries fail → mark `telegram_sent: false`, log error
+- Missing / empty `TELEGRAM_BOT_TOKEN` → skip silently (bot is optional)
 
-**Tools used:** `python-telegram-bot`, FastAPI WebSocket manager, `motor`
+**Tools used:** `python-telegram-bot`, `motor`
 
 ---
 
-## 4. Telegram Bot (Interactive)
+## 4. Telegram Bot (Interactive) — Phase 2, not yet built
 
 **Role:** Handles user commands for on-demand queries and watchlist management.
 
 **Trigger:** Incoming Telegram update (polling or webhook).
 
-**Commands and handlers:**
+**Planned commands:**
 
 | Command | Handler | Description |
 |---|---|---|
@@ -191,7 +179,7 @@ Return ONLY valid JSON. No preamble.
 
 ## Agent Communication Pattern
 
-Agents communicate via **MongoDB document state** (simple and reliable) rather than an internal queue or message broker. This avoids operational overhead.
+Agents communicate via **MongoDB document state** rather than an internal queue or message broker. This avoids operational overhead.
 
 ```
 raw_news.status:
@@ -204,7 +192,7 @@ alerts.telegram_sent:
   true                → successfully sent
 ```
 
-For the WebSocket real-time push, FastAPI maintains an in-memory connection manager. This is intentionally not persisted — if a dashboard client is disconnected, it catches up on reconnect via a REST call to `GET /api/alerts?limit=20`.
+The dashboard fetches alerts via REST (`GET /api/alerts`) on a 60-second poll cycle. A WebSocket endpoint (`/ws`) exists on the backend but is not consumed by the dashboard — it is reserved for a future live price streaming feature.
 
 ---
 
