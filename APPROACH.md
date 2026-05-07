@@ -318,9 +318,9 @@ TickTracker/
 - [x] 60-second polling for live alert feed
 - [x] Score badges, sentiment badges, 52-week range bars
 
-### Phase 2 — Telegram Command Handlers (next)
-- [ ] `/price`, `/latest`, `/add`, `/remove`, `/watchlist`, `/scan` handlers
-- [ ] Inline watchlist management via bot
+### Phase 2 — Telegram Command Handlers ✅
+- [x] `/price`, `/latest`, `/add`, `/remove`, `/watchlist`, `/scan` handlers
+- [x] Inline watchlist management via bot (`backend/bot/`)
 
 ### Phase 4 — Polish & Deploy
 - [ ] Full Docker Compose (backend + frontend containers)

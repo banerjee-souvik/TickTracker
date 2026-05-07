@@ -145,7 +145,7 @@ This file defines every AI agent and automated worker in TickTracker. Each entry
 
 ---
 
-## 4. Telegram Bot (Interactive) — Phase 2, not yet built
+## 4. Telegram Bot (Interactive)
 
 **Role:** Handles user commands for on-demand queries and watchlist management.
 

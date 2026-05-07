@@ -16,7 +16,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 async def lifespan(app: FastAPI):
     await setup_indexes()
     setup_scheduler()
+
+    from bot import build, start as start_bot, stop as stop_bot
+    bot_app = build()
+    if bot_app:
+        await start_bot(bot_app)
+
     yield
+
+    if bot_app:
+        await stop_bot(bot_app)
     close_mongo()
 
 
