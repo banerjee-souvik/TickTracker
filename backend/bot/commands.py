@@ -11,9 +11,11 @@ from services.mongo_service import get_db
 
 logger = logging.getLogger(__name__)
 
+_MD = "Markdown"  # v1 — only *, _, `, [ need escaping; dots/commas/% are fine
+
 HELP_TEXT = (
     "*TickTracker* — Bharat Equity Sentinel\n\n"
-    "`/price TICKER` — Current LTP \\+ day change\n"
+    "`/price TICKER` — Current LTP + day change\n"
     "`/latest TICKER` — Last 3 alerts for a ticker\n"
     "`/add TICKER` — Add ticker to watchlist\n"
     "`/remove TICKER` — Remove ticker from watchlist\n"
@@ -25,45 +27,41 @@ HELP_TEXT = (
 # ── commands ──────────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(HELP_TEXT, parse_mode="MarkdownV2")
+    await update.message.reply_text(HELP_TEXT, parse_mode=_MD)
 
 
 async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text(
-            "Usage: `/price RELIANCE\\.NS`", parse_mode="MarkdownV2"
-        )
+        await update.message.reply_text("Usage: `/price RELIANCE.NS`", parse_mode=_MD)
         return
 
     ticker = _normalise(context.args[0])
-    msg = await update.message.reply_text(f"Fetching `{ticker}`…", parse_mode="MarkdownV2")
+    msg = await update.message.reply_text(f"Fetching `{ticker}`…", parse_mode=_MD)
 
     from services.stock_service import get_price
     try:
         price = await get_price(ticker)
     except Exception:
-        await msg.edit_text(f"Failed to fetch price for `{_esc(ticker)}`", parse_mode="MarkdownV2")
+        await msg.edit_text(f"Failed to fetch price for `{ticker}`", parse_mode=_MD)
         return
 
     if not price:
-        await msg.edit_text(f"No price data for `{_esc(ticker)}`", parse_mode="MarkdownV2")
+        await msg.edit_text(f"No price data for `{ticker}`", parse_mode=_MD)
         return
 
-    sign = "\\+" if price["change_pct"] >= 0 else "\\-"
+    sign = "+" if price["change_pct"] >= 0 else "-"
     change = abs(price["change_pct"])
     await msg.edit_text(
         f"*{_esc(ticker)}*\n"
         f"_{_esc(price.get('name', ticker))}_\n\n"
         f"₹{price['ltp']:,.2f}   {sign}{change:.2f}%",
-        parse_mode="MarkdownV2",
+        parse_mode=_MD,
     )
 
 
 async def cmd_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text(
-            "Usage: `/latest RELIANCE\\.NS`", parse_mode="MarkdownV2"
-        )
+        await update.message.reply_text("Usage: `/latest RELIANCE.NS`", parse_mode=_MD)
         return
 
     ticker = _normalise(context.args[0])
@@ -72,7 +70,7 @@ async def cmd_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not docs:
         await update.message.reply_text(
-            f"No alerts found for `{_esc(ticker)}`", parse_mode="MarkdownV2"
+            f"No alerts found for `{ticker}`", parse_mode=_MD
         )
         return
 
@@ -80,22 +78,20 @@ async def cmd_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for doc in docs:
         score = doc["materiality_score"]
         sentiment = doc["sentiment"]
-        headline = doc["headline"][:80]
-        lines.append(f"*{score}/10* {_esc(sentiment)} — {_esc(headline)}")
+        headline = _esc(doc["headline"][:80])
+        lines.append(f"*{score}/10* {sentiment} — {headline}")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="MarkdownV2")
+    await update.message.reply_text("\n".join(lines), parse_mode=_MD)
 
 
 async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text(
-            "Usage: `/add RELIANCE\\.NS`", parse_mode="MarkdownV2"
-        )
+        await update.message.reply_text("Usage: `/add RELIANCE.NS`", parse_mode=_MD)
         return
 
     raw = context.args[0]
     msg = await update.message.reply_text(
-        f"Validating `{_esc(raw.upper())}`…", parse_mode="MarkdownV2"
+        f"Validating `{raw.upper()}`…", parse_mode=_MD
     )
 
     from services.stock_service import validate_ticker
@@ -103,8 +99,8 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not result:
         await msg.edit_text(
-            f"❌ `{_esc(raw.upper())}` not found on NSE/BSE\nTry appending `.NS` or `.BO`",
-            parse_mode="MarkdownV2",
+            f"❌ `{raw.upper()}` not found on NSE/BSE\nTry appending .NS or .BO",
+            parse_mode=_MD,
         )
         return
 
@@ -127,15 +123,13 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ *{_esc(ticker)}* added to watchlist\n"
         f"_{_esc(company_name)}_\n"
         f"Scraping news in background…",
-        parse_mode="MarkdownV2",
+        parse_mode=_MD,
     )
 
 
 async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text(
-            "Usage: `/remove RELIANCE\\.NS`", parse_mode="MarkdownV2"
-        )
+        await update.message.reply_text("Usage: `/remove RELIANCE.NS`", parse_mode=_MD)
         return
 
     ticker = _normalise(context.args[0])
@@ -144,13 +138,13 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if result.matched_count == 0:
         await update.message.reply_text(
-            f"❌ `{_esc(ticker)}` not in watchlist", parse_mode="MarkdownV2"
+            f"❌ `{ticker}` not in watchlist", parse_mode=_MD
         )
         return
 
     await db.raw_news.delete_many({"ticker": ticker})
     await update.message.reply_text(
-        f"✅ *{_esc(ticker)}* removed from watchlist", parse_mode="MarkdownV2"
+        f"✅ *{_esc(ticker)}* removed from watchlist", parse_mode=_MD
     )
 
 
@@ -160,27 +154,25 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not docs:
         await update.message.reply_text(
-            "Watchlist is empty\\.\nUse `/add TICKER` to start monitoring\\.",
-            parse_mode="MarkdownV2",
+            "Watchlist is empty.\nUse `/add TICKER` to start monitoring.",
+            parse_mode=_MD,
         )
         return
 
     from services.stock_service import get_price
     lines = ["*Watchlist*\n"]
-    for doc in docs:
+    for i, doc in enumerate(docs):
         ticker = doc["ticker"]
         price = await get_price(ticker)
         if price:
-            sign = "\\+" if price["change_pct"] >= 0 else "\\-"
+            sign = "+" if price["change_pct"] >= 0 else "-"
             change = abs(price["change_pct"])
-            lines.append(
-                f"`{_esc(ticker)}` — ₹{price['ltp']:,.2f}  {sign}{change:.2f}%"
-            )
+            lines.append(f"`{ticker}` — ₹{price['ltp']:,.2f}  {sign}{change:.2f}%")
         else:
             name = doc.get("name", "")
-            lines.append(f"`{_esc(ticker)}`  _{_esc(name)}_")
+            lines.append(f"`{ticker}`  _{_esc(name)}_")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="MarkdownV2")
+    await update.message.reply_text("\n".join(lines), parse_mode=_MD)
 
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -198,8 +190,8 @@ def _normalise(ticker: str) -> str:
 
 
 def _esc(text: str) -> str:
-    """Escape special characters for Telegram MarkdownV2."""
-    for ch in r"_*[]()~`>#+-=|{}.!\\":
+    """Escape special characters for Telegram Markdown v1."""
+    for ch in r"_*`[":
         text = text.replace(ch, f"\\{ch}")
     return text
 
