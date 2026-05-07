@@ -106,7 +106,10 @@ async def get_price(ticker: str) -> dict | None:
     db = get_db()
     cached = await db.price_cache.find_one({"_id": ticker})
     if cached:
-        age = (datetime.now(timezone.utc) - cached["fetched_at"]).total_seconds()
+        fetched_at = cached["fetched_at"]
+        if fetched_at.tzinfo is None:
+            fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - fetched_at).total_seconds()
         if age < 300:
             return cached
     return await refresh_price(ticker)
